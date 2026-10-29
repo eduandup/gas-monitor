@@ -1,0 +1,16 @@
+# secrets: Wi-Fi password, Supabase keys, device key
+firmware/gas_monitor/secrets.h
+*.local.sql
+.env
+
+# old working copies (the first sketch here still has the Wi-Fi password in it)
+/gas_monitor/
+/archive/
+HANDOVER.md
+# superseded by tools/build_page.py + firmware/local_page.html
+firmware/template.ino
+tools/build_ino.py
+
+# build output
+build/
+__pycache__/

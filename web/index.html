@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<!-- Cloud dashboard: reads from Supabase. Settings live in config.js. -->
+<title>Gas Monitor</title>
+<style>
+:root{
+  --bg:#f3f2ee;--card:#ffffff;--fg:#1c1c1a;--muted:#6d6c66;--line:#e2e0d9;--track:#ecebe5;
+  --ok:#2e8b57;--warn:#d4891c;--low:#c94a3a;--c1:#2f6fb0;--c2:#c46a1f;
+}
+@media (prefers-color-scheme:dark){
+  :root{--bg:#121211;--card:#1c1c1a;--fg:#efeee8;--muted:#9b9a92;--line:#2f2f2b;--track:#292926;--c1:#6aa6e8;--c2:#ec9a52;--ok:#4caf7a}
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:980px;margin:0 auto;padding:20px 16px 40px}
+header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:16px}
+h1{margin:0;font-size:24px;letter-spacing:-.01em}
+.sub{color:var(--muted);font-size:13px;margin-top:2px}
+.summary{display:flex;gap:10px;flex-wrap:wrap}
+.chip{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 14px;min-width:110px}
+.chip .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
+.chip .v{font-size:17px;font-weight:650;white-space:nowrap}
+.grid{display:grid;grid-template-columns:1fr;gap:14px}
+@media(min-width:720px){.grid{grid-template-columns:1fr 1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px}
+.tank{display:flex;gap:18px}
+.cyl{flex:0 0 72px}
+.cyl svg{width:72px;height:auto;display:block}
+.info{flex:1;min-width:0}
+@media(max-width:480px){.tank{gap:14px}.cyl{flex-basis:52px}.cyl svg{width:52px}.rows{font-size:13.5px}}
+.top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.name{font-weight:650;font-size:16px;display:flex;align-items:center;gap:8px}
+.dot{width:10px;height:10px;border-radius:50%;flex:none}
+.badge{font-size:12px;padding:3px 10px;border-radius:999px;background:var(--track);color:var(--muted);white-space:nowrap}
+.badge.use{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
+.badge.bad{background:color-mix(in srgb,var(--low) 16%,transparent);color:var(--low)}
+.pct{font-size:44px;font-weight:700;line-height:1.05;margin-top:6px;letter-spacing:-.02em}
+.kg{color:var(--muted);font-size:14px}
+.rows{margin-top:12px;display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:14px}
+.rows .k{color:var(--muted)}
+.rows .v{text-align:right;font-weight:550}
+.foot{margin-top:12px;font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.hist{margin-top:14px}
+.hhead{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:10px}
+.seg{display:inline-flex;background:var(--track);border-radius:10px;padding:3px}
+.seg button{border:0;background:transparent;color:var(--muted);font:inherit;font-size:13px;padding:5px 12px;border-radius:8px;cursor:pointer}
+.seg button.on{background:var(--card);color:var(--fg);box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.legend{display:flex;gap:14px;font-size:13px;color:var(--muted);flex-wrap:wrap}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.cw{position:relative;touch-action:pan-y}
+#chart{width:100%;height:260px;display:block}
+.tip{position:absolute;top:8px;pointer-events:none;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font-size:12px;box-shadow:0 4px 14px rgba(0,0,0,.14);display:none;white-space:nowrap}
+.alert{background:color-mix(in srgb,var(--low) 16%,transparent)!important}
+.demo{background:color-mix(in srgb,var(--warn) 18%,transparent);border-radius:10px;padding:8px 12px;font-size:13px;margin-bottom:14px;display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="demo" id="demo"></div>
+  <div class="demo alert" id="offline"></div>
+  <header>
+    <div>
+      <h1>Gas Monitor</h1>
+      <div class="sub" id="sub">Connecting…</div>
+    </div>
+    <div class="summary">
+      <div class="chip"><div class="k">Gas left</div><div class="v" id="sTotal">–</div></div>
+      <div class="chip"><div class="k">Usage</div><div class="v" id="sRate">–</div></div>
+      <div class="chip"><div class="k">All tanks empty</div><div class="v" id="sEmpty">–</div></div>
+    </div>
+  </header>
+
+  <div class="grid" id="tanks"></div>
+
+  <div class="card hist">
+    <div class="hhead">
+      <div class="name">History</div>
+      <div class="legend" id="legend"></div>
+      <div class="seg" id="seg">
+        <button data-h="24">24 h</button><button data-h="168" class="on">7 days</button><button data-h="720">30 days</button>
+      </div>
+    </div>
+    <div class="cw" id="cw"><svg id="chart"></svg><div class="tip" id="tip"></div></div>
+  </div>
+</div>
+
+<script src="config.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const CFG = Object.assign({tanks: [], hubOfflineMin: 20}, window.GAS_CONFIG);
+const COLORS = ['var(--c1)', 'var(--c2)', '#7a5cc2', '#3a9b8f'];
+const RATE_WINDOW_H = 72, REFILL_JUMP_PCT = 8;      // same as the ESP32 sketch
+const BUCKET_MIN = {72: 15, 168: 30, 720: 120};     // history fetched per range: hours -> bucket minutes
+let demo = false, state = null, range = 168, series = [], geom = null;
+let cache = {}, lastNewest = null;                  // cache[hours] = {at, bucket, by: {tank: [[t, mm]]}}
+
+const lvlColor = p => p == null ? 'var(--muted)' : p < 15 ? 'var(--low)' : p < 30 ? 'var(--warn)' : 'var(--ok)';
+const fmtDate = s => new Date(s * 1000).toLocaleDateString('en-ZA', {weekday: 'short', day: 'numeric', month: 'short'});
+const fmtTime = s => new Date(s * 1000).toLocaleString('en-ZA', {weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'});
+const fmtAge = s => (s = Math.max(0, Math.round(s))) < 60 ? s + ' s ago' : s < 3600 ? Math.round(s / 60) + ' min ago' : s < 172800 ? Math.round(s / 3600) + ' h ago' : Math.round(s / 86400) + ' days ago';
+const tankName = i => state && state.tanks[i] ? state.tanks[i].name : 'Tank ' + (i + 1);
+const tsOf = iso => Date.parse(iso) / 1000;
+
+// ---------- tank geometry: mm of liquid -> % of gas (same as the sketch) ----------
+function volAt(c, h) {                               // 2:1 elliptical bottom + straight body
+  const a = c.diameterMm / 2, hd = c.diameterMm / 4;
+  if (h <= 0) return 0;
+  if (h <= hd) return Math.PI * a * a * (h * h / hd - h * h * h / (3 * hd * hd));
+  return Math.PI * a * a * (2 * hd / 3 + (h - hd));
+}
+function pctFor(c, mm) {
+  const v0 = volAt(c, c.emptyMm), v1 = volAt(c, c.fullMm);
+  return Math.min(100, Math.max(0, (volAt(c, mm) - v0) / (v1 - v0) * 100));
+}
+
+// ---------- usage statistics, ported from computeStats() in the sketch ----------
+// pts: [[unix s, percent]] in time order
+function computeStats(pts, cap, now) {
+  const s = {rate: null, used24: null}, n = pts.length;
+  if (n < 2) return s;
+  // usage rate: linear trend of kg over the last RATE_WINDOW_H hours, stopping at a refill
+  const winStart = now - RATE_WINDOW_H * 3600;
+  let start = n - 1;
+  while (start > 0) {
+    if (pts[start - 1][0] < winStart) break;
+    if (pts[start][1] - pts[start - 1][1] > REFILL_JUMP_PCT) break;
+    start--;
+  }
+  const m = n - start;
+  if (m >= 8 && pts[n - 1][0] - pts[start][0] >= 6 * 3600) {
+    let sx = 0, sy = 0, sxx = 0, sxy = 0;
+    const t0 = pts[start][0];
+    for (let k = start; k < n; k++) {
+      const x = (pts[k][0] - t0) / 3600, y = cap * pts[k][1] / 100;
+      sx += x; sy += y; sxx += x * x; sxy += x * y;
+    }
+    const den = m * sxx - sx * sx;
+    if (den > 0) s.rate = Math.max(0, -((m * sxy - sx * sy) / den) * 24);
+  }
+  // gas used in the last 24 h (skipped if a refill happened)
+  const dayAgo = now - 86400;
+  let k = n - 1, refill = false;
+  while (k > 0 && pts[k - 1][0] >= dayAgo) {
+    if (pts[k][1] - pts[k - 1][1] > REFILL_JUMP_PCT) { refill = true; break; }
+    k--;
+  }
+  if (!refill && pts[n - 1][0] - pts[k][0] >= 20 * 3600)
+    s.used24 = Math.max(0, cap * (pts[k][1] - pts[n - 1][1]) / 100);
+  return s;
+}
+
+// ---------- Supabase ----------
+const configured = () => /^https:\/\/.+/.test(CFG.supabaseUrl || '') && (CFG.supabaseKey || '').length > 20;
+
+async function sb(path, body) {
+  const headers = {apikey: CFG.supabaseKey};
+  if (CFG.supabaseKey.startsWith('eyJ')) headers.Authorization = 'Bearer ' + CFG.supabaseKey;   // legacy JWT anon key
+  if (body) headers['Content-Type'] = 'application/json';
+  const r = await fetch(CFG.supabaseUrl.replace(/\/$/, '') + '/rest/v1/' + path,
+    {method: body ? 'POST' : 'GET', headers, body: body ? JSON.stringify(body) : undefined, cache: 'no-store'});
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+async function loadHistory(hours) {
+  const bucket = BUCKET_MIN[hours];
+  const rows = await sb('rpc/history', {p_hours: hours, p_bucket_min: bucket});
+  const by = {};
+  for (const r of rows) (by[r.tank] = by[r.tank] || []).push([tsOf(r.bucket) + bucket * 30, r.level_mm]);   // plot at bucket middle
+  cache[hours] = {at: Date.now(), bucket, by};
+}
+
+function buildState(latest) {
+  const now = Date.now() / 1000, h = cache[72];
+  let newest = null;
+  const tanks = CFG.tanks.map(c => {
+    const r = latest.find(x => x.tank === c.tank);
+    const ts = r ? tsOf(r.ts) : null;
+    if (ts && (newest == null || ts > newest)) newest = ts;
+    const heard = !!r && r.quality != null;
+    const mm = r && r.good_level_mm != null ? r.good_level_mm : null;
+    const pct = mm == null ? null : pctFor(c, mm);
+    const kg = pct == null ? null : c.capacityKg * pct / 100;
+    const pts = ((h && h.by[c.tank]) || []).map(([t, v]) => [t, pctFor(c, v)]);
+    const st = computeStats(pts, c.capacityKg, now);
+    const days = st.rate != null && st.rate >= 0.1 && kg != null ? kg / st.rate : null;
+    return {
+      name: c.name, mac: c.mac, capacity_kg: c.capacityKg, valid: heard,
+      age_s: ts == null ? null : now - ts, level_age_s: r && r.good_ts ? now - tsOf(r.good_ts) : null,
+      quality: heard ? r.quality : null, level_mm: mm == null ? null : Math.round(mm), percent: pct, kg,
+      temp_c: heard ? r.temp_c : null, battery_v: heard ? r.battery_v : null,
+      battery_pct: heard && r.battery_v != null ? Math.round(Math.min(100, Math.max(0, (r.battery_v - 2.2) / 0.65 * 100))) : null,
+      rssi: heard ? r.rssi : null, rate_kg_day: st.rate, used_24h: st.used24,
+      days_left: days, empty_at: days ? now + days * 86400 : null,
+    };
+  });
+  return {now, newest, tanks};
+}
+
+// chart data for the selected range: {gap: s, series: [[[t, pct]], ...]}
+function chartData() {
+  if (demo) return state.demoChart;
+  const h = cache[range === 24 ? 72 : range];
+  if (!h) return null;
+  return {gap: h.bucket * 60 * 3, series: CFG.tanks.map(c => (h.by[c.tank] || []).map(([t, v]) => [t, pctFor(c, v)]))};
+}
+
+// ---------- rendering ----------
+function status(t) {
+  if (t.age_s == null || t.age_s > CFG.hubOfflineMin * 60) return ['Hub offline', 'bad'];
+  if (!t.valid) return ['No signal', 'bad'];
+  if (t.quality === 0) return ['No reading', 'bad'];
+  if (t.rate_kg_day != null && t.rate_kg_day >= 0.1) return ['In use', 'use'];
+  return ['Standby', ''];
+}
+
+function signal(r) {
+  if (r == null) return '–';
+  return (r >= -70 ? 'Good' : r >= -85 ? 'OK' : 'Weak') + ' · ' + r + ' dBm';
+}
+
+function cylinder(p, i) {
+  const h = 160 * (p || 0) / 100;
+  return `<svg viewBox="0 0 80 200" aria-hidden="true">
+    <defs><clipPath id="cb${i}"><rect x="8" y="34" width="64" height="160" rx="24"/></clipPath></defs>
+    <rect x="31" y="4" width="18" height="10" rx="2" fill="var(--muted)" opacity=".5"/>
+    <rect x="36" y="13" width="8" height="8" fill="var(--muted)" opacity=".5"/>
+    <path d="M20 36 V24 Q20 19 25 19 H55 Q60 19 60 24 V36" fill="none" stroke="var(--line)" stroke-width="5"/>
+    <rect x="8" y="34" width="64" height="160" rx="24" fill="var(--track)"/>
+    <rect clip-path="url(#cb${i})" x="8" y="${194 - h}" width="64" height="${h}" fill="${lvlColor(p)}" opacity=".88"/>
+    <rect x="8" y="34" width="64" height="160" rx="24" fill="none" stroke="var(--line)" stroke-width="2"/>
+  </svg>`;
+}
+
+function tankCard(t, i) {
+  const p = t.percent;
+  const [st, cls] = status(t);
+  let empty = '–';
+  if (t.days_left != null) {
+    const d = t.days_left;
+    empty = '~' + (d < 2 ? Math.round(d * 24) + ' h' : Math.round(d) + ' days') + ' · ' + fmtDate(t.empty_at);
+  }
+  const rate = t.rate_kg_day == null ? 'Learning…' : t.rate_kg_day < 0.1 ? 'Idle' : t.rate_kg_day.toFixed(2) + ' kg/day';
+  const rows = [
+    ['Usage', rate],
+    ['Used last 24 h', t.used_24h == null ? '–' : t.used_24h.toFixed(1) + ' kg'],
+    ['Empty in', empty],
+    ['Temperature', t.temp_c == null ? '–' : t.temp_c + ' °C'],
+    ['Sensor battery', t.battery_v == null ? '–' : t.battery_pct + '% · ' + t.battery_v.toFixed(2) + ' V'],
+    ['Signal', signal(t.rssi)],
+    ['Liquid height', t.level_mm == null ? '–' : t.level_mm + ' mm' + (t.quality == null ? '' : ' · quality ' + t.quality + '/3')],
+  ].map(([k, v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join('');
+  let foot = t.mac;
+  if (t.age_s != null) foot += ' · updated ' + fmtAge(t.age_s);
+  if (t.level_age_s != null && t.level_age_s - (t.age_s || 0) > 1800) foot += ' · level from ' + fmtAge(t.level_age_s);
+  return `<div class="card tank">
+    <div class="cyl">${cylinder(p, i)}</div>
+    <div class="info">
+      <div class="top"><div class="name"><span class="dot" style="background:${COLORS[i]}"></span>${t.name}</div><span class="badge ${cls}">${st}</span></div>
+      <div class="pct" style="color:${lvlColor(p)}">${p == null ? '–' : Math.round(p) + '%'}</div>
+      <div class="kg">${t.kg == null ? '–' : t.kg.toFixed(1)} of ${t.capacity_kg} kg</div>
+      <div class="rows">${rows}</div>
+      <div class="foot">${foot}</div>
+    </div>
+  </div>`;
+}
+
+function render() {
+  if (!state) return;
+  const ts = state.tanks;
+  $('tanks').innerHTML = ts.map(tankCard).join('');
+  let kg = 0, cap = 0, rate = 0, any = false;
+  ts.forEach(t => {
+    cap += t.capacity_kg;
+    if (t.kg != null) { kg += t.kg; any = true; }
+    if (t.rate_kg_day != null && t.rate_kg_day >= 0.1) rate += t.rate_kg_day;
+  });
+  $('sTotal').textContent = any ? kg.toFixed(0) + ' / ' + cap + ' kg' : '–';
+  $('sRate').textContent = rate > 0 ? rate.toFixed(2) + ' kg/day' : '–';
+  const days = rate > 0 && any ? kg / rate : null;
+  $('sEmpty').textContent = days ? '~' + Math.round(days) + ' days · ' + fmtDate(state.now + days * 86400) : '–';
+  $('sub').textContent = ts.length + ' tanks · ' + (state.newest ? 'updated ' + fmtAge(state.now - state.newest) : 'no readings yet');
+  $('legend').innerHTML = ts.map((t, i) => `<span><span class="dot" style="background:${COLORS[i]}"></span>${t.name}</span>`).join('');
+
+  const off = $('offline');
+  if (demo) off.style.display = 'none';
+  else if (!state.newest) {
+    off.textContent = "No readings yet: the hub hasn't uploaded anything to the database.";
+    off.style.display = 'block';
+  } else if (state.now - state.newest > CFG.hubOfflineMin * 60) {
+    off.textContent = 'Hub offline since ' + fmtTime(state.newest) + '. Showing the last readings it sent.';
+    off.style.display = 'block';
+  } else off.style.display = 'none';
+}
+
+function xTicks(from, to) {
+  const out = [], span = to - from;
+  if (span <= 86400 * 1.01) {
+    const d = new Date(from * 1000); d.setMinutes(0, 0, 0);
+    for (let t = d.getTime() / 1000; t <= to; t += 3600) {
+      const h = new Date(t * 1000).getHours();
+      if (t >= from && h % 4 === 0) out.push([t, String(h).padStart(2, '0') + ':00']);
+    }
+  } else {
+    const d = new Date(from * 1000); d.setHours(0, 0, 0, 0);
+    const daily = span <= 8 * 86400;
+    for (let k = 0; d.getTime() / 1000 <= to; k++, d.setDate(d.getDate() + 1)) {
+      const t = d.getTime() / 1000;
+      if (t < from) continue;
+      if (daily) out.push([t, d.toLocaleDateString('en-ZA', {weekday: 'short'})]);
+      else if (d.getDate() % 5 === 1) out.push([t, d.toLocaleDateString('en-ZA', {day: 'numeric', month: 'short'})]);
+    }
+  }
+  return out;
+}
+
+function drawChart() {
+  const svg = $('chart');
+  const cd = state && chartData();
+  if (!cd) return;
+  const W = svg.clientWidth || 600, H = 260, L = 42, R = 12, T = 12, B = 28;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  const now = state.now, from = now - range * 3600;
+  const X = t => L + (t - from) / (now - from) * (W - L - R);
+  const Y = p => T + (1 - p / 100) * (H - T - B);
+  let g = '';
+  for (const p of [0, 25, 50, 75, 100]) {
+    g += `<line x1="${L}" x2="${W - R}" y1="${Y(p)}" y2="${Y(p)}" stroke="var(--line)"/>`;
+    g += `<text x="${L - 8}" y="${Y(p) + 4}" text-anchor="end" font-size="11" fill="var(--muted)">${p}%</text>`;
+  }
+  for (const [t, lab] of xTicks(from, now)) {
+    const x = X(t);
+    g += `<line x1="${x}" x2="${x}" y1="${T}" y2="${H - B}" stroke="var(--line)" stroke-dasharray="2 4"/>`;
+    g += `<text x="${x}" y="${H - 8}" text-anchor="middle" font-size="11" fill="var(--muted)">${lab}</text>`;
+  }
+  series = cd.series.map(pts => pts.filter(p => p[0] >= from));
+  let total = 0;
+  series.forEach((pts, i) => {
+    let d = '', prev = null;
+    for (const [t, p] of pts) {
+      d += (prev == null || t - prev > cd.gap ? 'M' : 'L') + X(t).toFixed(1) + ' ' + Y(p).toFixed(1);
+      prev = t;
+    }
+    total += pts.length;
+    g += `<path d="${d}" fill="none" stroke="${COLORS[i]}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
+  });
+  if (!total) g += `<text x="${(L + W - R) / 2}" y="${H / 2}" text-anchor="middle" font-size="13" fill="var(--muted)">No readings in this period yet</text>`;
+  g += `<line id="xh" y1="${T}" y2="${H - B}" stroke="var(--muted)" visibility="hidden"/>`;
+  series.forEach((_, i) => { g += `<circle id="mk${i}" r="4" fill="${COLORS[i]}" stroke="var(--card)" stroke-width="2" visibility="hidden"/>`; });
+  svg.innerHTML = g;
+  geom = {X, Y, L, R, W, from, now};
+}
+
+function nearest(pts, t) {
+  let lo = 0, hi = pts.length - 1;
+  if (hi < 0) return null;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (pts[mid][0] < t) lo = mid + 1; else hi = mid; }
+  if (lo > 0 && Math.abs(pts[lo - 1][0] - t) < Math.abs(pts[lo][0] - t)) lo--;
+  return pts[lo];
+}
+
+function hideTip() {
+  $('tip').style.display = 'none';
+  const xh = $('xh'); if (xh) xh.setAttribute('visibility', 'hidden');
+  series.forEach((_, i) => { const m = $('mk' + i); if (m) m.setAttribute('visibility', 'hidden'); });
+}
+
+$('cw').addEventListener('pointermove', e => {
+  if (!geom) return;
+  const r = $('chart').getBoundingClientRect(), x = e.clientX - r.left;
+  const {X, Y, L, R, W, from, now} = geom;
+  if (x < L || x > W - R) return hideTip();
+  const t = from + (x - L) / (W - L - R) * (now - from);
+  const tol = Math.max(1800, (now - from) / 120);
+  const rows = [];
+  series.forEach((pts, i) => {
+    const pt = nearest(pts, t), mk = $('mk' + i);
+    if (pt && Math.abs(pt[0] - t) < tol) {
+      mk.setAttribute('cx', X(pt[0])); mk.setAttribute('cy', Y(pt[1])); mk.setAttribute('visibility', 'visible');
+      const cap = state && state.tanks[i] ? state.tanks[i].capacity_kg : 48;
+      rows.push(`<div><span style="color:${COLORS[i]}">●</span> ${tankName(i)}: ${pt[1].toFixed(1)}% · ${(pt[1] * cap / 100).toFixed(1)} kg</div>`);
+    } else mk.setAttribute('visibility', 'hidden');
+  });
+  const xh = $('xh'); xh.setAttribute('x1', x); xh.setAttribute('x2', x); xh.setAttribute('visibility', 'visible');
+  const tip = $('tip');
+  tip.innerHTML = `<div style="color:var(--muted)">${fmtTime(t)}</div>` + (rows.join('') || '<div>No data</div>');
+  tip.style.display = 'block';
+  tip.style.left = (x < W / 2 ? x + 12 : x - tip.offsetWidth - 12) + 'px';
+});
+$('cw').addEventListener('pointerleave', hideTip);
+
+$('seg').addEventListener('click', async e => {
+  const b = e.target.closest('button'); if (!b) return;
+  range = +b.dataset.h;
+  [...$('seg').children].forEach(x => x.classList.toggle('on', x === b));
+  hideTip();
+  const need = range === 24 ? 72 : range;
+  if (!demo && !cache[need]) { try { await loadHistory(need); } catch (err) {} }
+  drawChart();
+});
+window.addEventListener('resize', () => { hideTip(); drawChart(); });
+
+// ---------- demo data (only when the database can't be reached) ----------
+function enterDemo(why) {
+  demo = true;
+  $('demo').textContent = 'Demo data: ' + why + ' These are sample readings, not your tanks.';
+  $('demo').style.display = 'block';
+  const now = Math.floor(Date.now() / 1000), step = 900, n = 2880, t0 = now - (n - 1) * step;
+  let seed = 7; const rand = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const A = [], B = [];
+  let pa = 60; const refillAt = Math.round(n * 0.6);
+  for (let k = 0; k < n; k++) {
+    const t = t0 + k * step, h = new Date(t * 1000).getHours();
+    const use = (h >= 6 && h < 9) ? 3 : (h >= 17 && h < 22) ? 4 : 0.6;
+    pa = Math.max(0, pa - use * 0.0189);
+    if (k === refillAt) pa = 96;
+    const wob = Math.sin((h - 14) / 24 * 2 * Math.PI) * 0.4;
+    A.push([t, +(pa + wob + (rand() - .5) * 0.5).toFixed(1)]);
+    B.push([t, +(97 + wob + (rand() - .5) * 0.4).toFixed(1)]);
+  }
+  const mk = (c, p, rate, used, temp, bv, rssi) => {
+    const kg = c.capacityKg * p / 100, d = rate >= 0.1 ? kg / rate : null;
+    return {name: c.name, mac: c.mac, capacity_kg: c.capacityKg, valid: true, age_s: Math.round(rand() * 240), level_age_s: null,
+      quality: 3, level_mm: Math.round(c.emptyMm + p / 100 * (c.fullMm - c.emptyMm)), percent: p, kg, temp_c: temp,
+      battery_v: bv, battery_pct: 100, rssi, rate_kg_day: rate, used_24h: used, days_left: d, empty_at: d ? now + d * 86400 : null};
+  };
+  const cfg = i => CFG.tanks[i] || {name: 'Tank ' + (i + 1), mac: '', capacityKg: 48, fullMm: 900, emptyMm: 20};
+  state = {now, newest: now, demoChart: {gap: 2700, series: [A, B]}, tanks: [
+    mk(cfg(0), A[n - 1][1], 1.40, 1.4, 24, 3.19, -79),
+    mk(cfg(1), B[n - 1][1], 0, 0, 23, 3.25, -58),
+  ]};
+}
+
+// ---------- refresh ----------
+async function refresh() {
+  if (!configured()) { enterDemo("Supabase isn't set up in config.js yet."); render(); drawChart(); return; }
+  try {
+    const latest = await sb('latest?select=*');
+    const newest = latest.reduce((m, r) => r.ts > m ? r.ts : m, '');
+    const stale = h => !cache[h] || Date.now() - cache[h].at > 15 * 60000;
+    if (newest !== lastNewest || stale(72)) {          // new upload since last time: reload history
+      await loadHistory(72);
+      if (range !== 24) await loadHistory(range);
+      for (const h of [168, 720]) if (h !== range) delete cache[h];
+      lastNewest = newest;
+    }
+    if (demo) { demo = false; $('demo').style.display = 'none'; }
+    state = buildState(latest);
+    render(); drawChart();
+  } catch (e) {
+    if (!state || demo) { enterDemo("couldn't reach the database (" + e.message + "). Retrying every minute."); render(); drawChart(); }
+    else $('sub').textContent = 'Database not reachable, retrying… (' + e.message + ')';
+  }
+}
+
+refresh();
+setInterval(() => { if (!document.hidden) refresh(); }, 60000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+</script>
+</body>
+</html>
