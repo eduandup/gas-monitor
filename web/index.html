@@ -90,12 +90,12 @@ h1{margin:0;font-size:24px;letter-spacing:-.01em}
 <script src="config.js"></script>
 <script>
 const $ = id => document.getElementById(id);
-const CFG = Object.assign({tanks: [], hubOfflineMin: 20}, window.GAS_CONFIG);
+const CFG = Object.assign({tanks: [], hubOfflineMin: 20, expansionPerC: 0.0027}, window.GAS_CONFIG);
 const COLORS = ['var(--c1)', 'var(--c2)', '#7a5cc2', '#3a9b8f'];
 const RATE_WINDOW_H = 72, REFILL_JUMP_PCT = 8;      // same as the ESP32 sketch
 const BUCKET_MIN = {72: 15, 168: 30, 720: 120};     // history fetched per range: hours -> bucket minutes
 let demo = false, state = null, range = 168, series = [], geom = null;
-let cache = {}, lastNewest = null;                  // cache[hours] = {at, bucket, by: {tank: [[t, mm]]}}
+let cache = {}, lastNewest = null;                  // cache[hours] = {at, bucket, by: {tank: [[t, mm, tempC]]}}
 
 const lvlColor = p => p == null ? 'var(--muted)' : p < 15 ? 'var(--low)' : p < 30 ? 'var(--warn)' : 'var(--ok)';
 const fmtDate = s => new Date(s * 1000).toLocaleDateString('en-ZA', {weekday: 'short', day: 'numeric', month: 'short'});
@@ -111,9 +111,13 @@ function volAt(c, h) {                               // 2:1 elliptical bottom + 
   if (h <= hd) return Math.PI * a * a * (h * h / hd - h * h * h / (3 * hd * hd));
   return Math.PI * a * a * (2 * hd / 3 + (h - hd));
 }
-function pctFor(c, mm) {
+// Liquid LPG expands as it warms, so the same kg reads higher on a warm day.
+// tempC scales the liquid volume back to the calibration temperature (fullTempC).
+function pctFor(c, mm, tempC) {
   const v0 = volAt(c, c.emptyMm), v1 = volAt(c, c.fullMm);
-  return Math.min(100, Math.max(0, (volAt(c, mm) - v0) / (v1 - v0) * 100));
+  let v = volAt(c, mm);
+  if (tempC != null && c.fullTempC != null) v /= 1 + CFG.expansionPerC * (tempC - c.fullTempC);
+  return Math.min(100, Math.max(0, (v - v0) / (v1 - v0) * 100));
 }
 
 // ---------- usage statistics, ported from computeStats() in the sketch ----------
@@ -169,7 +173,7 @@ async function loadHistory(hours) {
   const bucket = BUCKET_MIN[hours];
   const rows = await sb('rpc/history', {p_hours: hours, p_bucket_min: bucket});
   const by = {};
-  for (const r of rows) (by[r.tank] = by[r.tank] || []).push([tsOf(r.bucket) + bucket * 30, r.level_mm]);   // plot at bucket middle
+  for (const r of rows) (by[r.tank] = by[r.tank] || []).push([tsOf(r.bucket) + bucket * 30, r.level_mm, r.temp_c]);   // plot at bucket middle
   cache[hours] = {at: Date.now(), bucket, by};
 }
 
@@ -182,9 +186,9 @@ function buildState(latest) {
     if (ts && (newest == null || ts > newest)) newest = ts;
     const heard = !!r && r.quality != null;
     const mm = r && r.good_level_mm != null ? r.good_level_mm : null;
-    const pct = mm == null ? null : pctFor(c, mm);
+    const pct = mm == null ? null : pctFor(c, mm, r.good_temp_c);
     const kg = pct == null ? null : c.capacityKg * pct / 100;
-    const pts = ((h && h.by[c.tank]) || []).map(([t, v]) => [t, pctFor(c, v)]);
+    const pts = ((h && h.by[c.tank]) || []).map(([t, v, tc]) => [t, pctFor(c, v, tc)]);
     const st = computeStats(pts, c.capacityKg, now);
     const days = st.rate != null && st.rate >= 0.1 && kg != null ? kg / st.rate : null;
     return {
@@ -205,7 +209,7 @@ function chartData() {
   if (demo) return state.demoChart;
   const h = cache[range === 24 ? 72 : range];
   if (!h) return null;
-  return {gap: h.bucket * 60 * 3, series: CFG.tanks.map(c => (h.by[c.tank] || []).map(([t, v]) => [t, pctFor(c, v)]))};
+  return {gap: h.bucket * 60 * 3, series: CFG.tanks.map(c => (h.by[c.tank] || []).map(([t, v, tc]) => [t, pctFor(c, v, tc)]))};
 }
 
 // ---------- rendering ----------

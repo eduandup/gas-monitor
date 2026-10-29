@@ -76,15 +76,18 @@ revoke all on function public.ingest(text, jsonb) from public, anon, authenticat
 grant execute on function public.ingest(text, jsonb) to anon;
 
 -- ---------------------------------------------------------------- read path (website)
--- Bucketed history for the charts: median level per tank per bucket.
+-- Bucketed history for the charts: median level and temperature per tank per bucket.
+-- The website uses temp_c to correct the level for the liquid's thermal expansion.
 -- POST /rest/v1/rpc/history  {"p_hours": 168, "p_bucket_min": 30}
 -- Buckets are labelled by their start time.
-create or replace function public.history(p_hours int, p_bucket_min int)
-returns table (tank smallint, bucket timestamptz, level_mm real)
+drop function if exists public.history(int, int);   -- return columns changed over time; replace needs a drop
+create function public.history(p_hours int, p_bucket_min int)
+returns table (tank smallint, bucket timestamptz, level_mm real, temp_c real)
 language sql stable set search_path = '' as $$
   select r.tank,
          date_bin(make_interval(mins => greatest(p_bucket_min, 1)), r.ts, '2000-01-01'::timestamptz),
-         (percentile_cont(0.5) within group (order by r.level_mm))::real
+         (percentile_cont(0.5) within group (order by r.level_mm))::real,
+         (percentile_cont(0.5) within group (order by r.temp_c))::real
   from public.readings r
   where r.ts > now() - make_interval(hours => least(greatest(p_hours, 1), 24 * 400))
     and r.level_mm is not null
@@ -99,12 +102,12 @@ grant execute on function public.history(int, int) to anon, authenticated;
 -- GET /rest/v1/latest?select=*
 drop view if exists public.latest;
 create view public.latest with (security_invoker = true) as
-  select r.*, g.level_mm as good_level_mm, g.ts as good_ts
+  select r.*, g.level_mm as good_level_mm, g.ts as good_ts, g.temp_c as good_temp_c
   from generate_series(1, 4) as t(tank)
   cross join lateral (
     select * from public.readings x where x.tank = t.tank order by x.ts desc limit 1) r
   left join lateral (
-    select y.level_mm, y.ts from public.readings y
+    select y.level_mm, y.ts, y.temp_c from public.readings y
     where y.tank = t.tank and y.level_mm is not null order by y.ts desc limit 1) g on true;
 revoke all on public.latest from anon, authenticated;
 grant select on public.latest to anon, authenticated;
