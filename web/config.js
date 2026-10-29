@@ -12,8 +12,8 @@ window.GAS_CONFIG = {
   // emptyMm: liquid height when the cylinder runs out              <- CALIBRATE
   // Changing these recalculates all history too, because the database stores millimetres.
   tanks: [
-    {tank: 1, name: 'Tank 1', mac: 'f1:81:73:69:2c:5b', capacityKg: 48, fullMm: 900, emptyMm: 20, diameterMm: 365},
-    {tank: 2, name: 'Tank 2', mac: 'e9:e1:cf:08:46:7c', capacityKg: 48, fullMm: 900, emptyMm: 20, diameterMm: 365},
+    {tank: 1, name: 'Tank 1', mac: 'f1:81:73:69:2c:5b', capacityKg: 48, fullMm: 836, emptyMm: 20, diameterMm: 365},
+    {tank: 2, name: 'Tank 2', mac: 'e9:e1:cf:08:46:7c', capacityKg: 48, fullMm: 836, emptyMm: 20, diameterMm: 365},
   ],
 
   hubOfflineMin: 20,        // no upload for this long -> "Hub offline" warning
