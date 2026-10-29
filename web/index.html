@@ -23,6 +23,13 @@ h1{margin:0;font-size:24px;letter-spacing:-.01em}
 .chip{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 14px;min-width:110px}
 .chip .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
 .chip .v{font-size:17px;font-weight:650;white-space:nowrap}
+.chip .s{font-size:12px;color:var(--muted);white-space:nowrap}
+@media(max-width:560px){
+  .summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;width:100%}
+  .chip{min-width:0;padding:8px 10px}
+  .chip .v{font-size:16px}
+  .chip .v,.chip .s{overflow:hidden;text-overflow:ellipsis}
+}
 .grid{display:grid;grid-template-columns:1fr;gap:14px}
 @media(min-width:720px){.grid{grid-template-columns:1fr 1fr}}
 .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px}
@@ -76,8 +83,8 @@ h1{margin:0;font-size:24px;letter-spacing:-.01em}
     </div>
     <div class="summary">
       <div class="chip"><div class="k">Gas left</div><div class="v" id="sTotal">–</div></div>
-      <div class="chip"><div class="k">Usage</div><div class="v" id="sRate">–</div></div>
-      <div class="chip"><div class="k">All tanks empty</div><div class="v" id="sEmpty">–</div></div>
+      <div class="chip"><div class="k">Usage</div><div class="v" id="sRate">–</div><div class="s" id="sRateSub"></div></div>
+      <div class="chip"><div class="k">All empty</div><div class="v" id="sEmpty">–</div><div class="s" id="sEmptySub"></div></div>
     </div>
   </header>
 
@@ -312,9 +319,11 @@ function render() {
     if (t.rate_kg_day != null && t.rate_kg_day >= 0.1) rate += t.rate_kg_day;
   });
   $('sTotal').textContent = any ? kg.toFixed(0) + ' / ' + cap + ' kg' : '–';
-  $('sRate').textContent = rate > 0 ? rate.toFixed(2) + ' kg/day' : '–';
+  $('sRate').textContent = rate > 0 ? rate.toFixed(2) + ' kg' : '–';
+  $('sRateSub').textContent = rate > 0 ? 'per day' : '';
   const days = rate > 0 && any ? kg / rate : null;
-  $('sEmpty').textContent = days ? '~' + Math.round(days) + ' days · ' + fmtDate(state.now + days * 86400) : '–';
+  $('sEmpty').textContent = days ? '~' + Math.round(days) + ' days' : '–';
+  $('sEmptySub').textContent = days ? fmtDate(state.now + days * 86400) : '';
   $('sub').textContent = ts.length + ' tanks · ' + (state.newest ? 'updated ' + fmtAge(state.now - state.newest) : 'no readings yet');
   $('legend').innerHTML = ts.map((t, i) => `<span><span class="dot" style="background:${COLORS[i]}"></span>${t.name}</span>`).join('');
 
