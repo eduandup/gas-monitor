@@ -12,10 +12,11 @@ window.GAS_CONFIG = {
   // emptyMm: liquid height when the cylinder runs out              <- CALIBRATE
   // fullTempC: sensor temperature when fullMm was read (levels are corrected to this temperature)
   // Changing these recalculates all history too, because the database stores millimetres.
-  // Cards show in this order, left to right: Tank 2 is the left cylinder.
+  // Cards show in this order, left to right. `name` is what the site shows; it doesn't have to
+  // match `tank`: the left cylinder's sensor is ESP32 tank 2, but it's called Tank 1 here.
   tanks: [
-    {tank: 2, name: 'Tank 2', mac: 'e9:e1:cf:08:46:7c', capacityKg: 48, fullMm: 836, fullTempC: 26, emptyMm: 20, diameterMm: 365},
-    {tank: 1, name: 'Tank 1', mac: 'f1:81:73:69:2c:5b', capacityKg: 48, fullMm: 836, fullTempC: 26, emptyMm: 20, diameterMm: 365},
+    {tank: 2, name: 'Tank 1', mac: 'e9:e1:cf:08:46:7c', capacityKg: 48, fullMm: 836, fullTempC: 26, emptyMm: 20, diameterMm: 365},
+    {tank: 1, name: 'Tank 2', mac: 'f1:81:73:69:2c:5b', capacityKg: 48, fullMm: 836, fullTempC: 26, emptyMm: 20, diameterMm: 365},
   ],
 
   // Liquid LPG grows about 0.27% in volume per °C (typical propane/butane mix).
