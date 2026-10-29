@@ -7,11 +7,11 @@
 <title>Gas Monitor</title>
 <style>
 :root{
-  --bg:#f3f2ee;--card:#ffffff;--fg:#1c1c1a;--muted:#6d6c66;--line:#e2e0d9;--track:#ecebe5;
+  --bg:#f3f2ee;--card:#ffffff;--fg:#1c1c1a;--muted:#6d6c66;--line:#e2e0d9;--track:#ecebe5;--tile:#f6f5f1;--warn-text:#9a5b0b;
   --ok:#2e8b57;--warn:#d4891c;--low:#c94a3a;--c1:#2f6fb0;--c2:#c46a1f;
 }
 @media (prefers-color-scheme:dark){
-  :root{--bg:#121211;--card:#1c1c1a;--fg:#efeee8;--muted:#9b9a92;--line:#2f2f2b;--track:#292926;--c1:#6aa6e8;--c2:#ec9a52;--ok:#4caf7a}
+  :root{--bg:#121211;--card:#1c1c1a;--fg:#efeee8;--muted:#9b9a92;--line:#2f2f2b;--track:#292926;--tile:#232321;--c1:#6aa6e8;--c2:#ec9a52;--ok:#4caf7a;--warn:#e0a040;--warn-text:#e0a040}
 }
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
@@ -26,11 +26,11 @@ h1{margin:0;font-size:24px;letter-spacing:-.01em}
 .grid{display:grid;grid-template-columns:1fr;gap:14px}
 @media(min-width:720px){.grid{grid-template-columns:1fr 1fr}}
 .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px}
-.tank{display:flex;gap:18px}
-.cyl{flex:0 0 72px}
-.cyl svg{width:72px;height:auto;display:block}
+.tank{display:flex;flex-direction:column;gap:16px}
+.thead{display:flex;gap:18px;align-items:center}
+.cyl{flex:0 0 60px}
+.cyl svg{width:60px;height:auto;display:block}
 .info{flex:1;min-width:0}
-@media(max-width:480px){.tank{gap:14px}.cyl{flex-basis:52px}.cyl svg{width:52px}.rows{font-size:13.5px}}
 .top{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .name{font-weight:650;font-size:16px;display:flex;align-items:center;gap:8px}
 .dot{width:10px;height:10px;border-radius:50%;flex:none}
@@ -39,10 +39,18 @@ h1{margin:0;font-size:24px;letter-spacing:-.01em}
 .badge.bad{background:color-mix(in srgb,var(--low) 16%,transparent);color:var(--low)}
 .pct{font-size:44px;font-weight:700;line-height:1.05;margin-top:6px;letter-spacing:-.02em}
 .kg{color:var(--muted);font-size:14px}
-.rows{margin-top:12px;display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:14px}
-.rows .k{color:var(--muted)}
-.rows .v{text-align:right;font-weight:550}
-.foot{margin-top:12px;font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+.tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.tile{background:var(--tile);border-radius:12px;padding:10px 12px;min-width:0}
+.tile .k{font-size:12px;color:var(--muted)}
+.tile .v{font-size:15px;font-weight:650;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tile .s{font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:420px){.tiles{gap:6px}.tile{padding:9px 10px}}
+.strip{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted);padding-top:12px;border-top:1px solid var(--line)}
+.strip span{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.strip svg{flex:none}
+.strip .warn{color:var(--warn-text)}
+.strip .bad{color:var(--low)}
+.foot{margin-top:-6px;font-size:12px;color:var(--muted);overflow-wrap:anywhere}
 .hist{margin-top:14px}
 .hhead{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:10px}
 .seg{display:inline-flex;background:var(--track);border-radius:10px;padding:3px}
@@ -222,10 +230,23 @@ function status(t) {
   return ['Standby', ''];
 }
 
+// [label, bars lit out of 4, css class]
 function signal(r) {
-  if (r == null) return '–';
-  return (r >= -70 ? 'Good' : r >= -85 ? 'OK' : 'Weak') + ' · ' + r + ' dBm';
+  if (r >= -70) return ['Good', 4, ''];
+  if (r >= -85) return ['OK', 3, ''];
+  return ['Weak', r >= -95 ? 2 : 1, 'warn'];
 }
+const QUALITY = ['No reading', 'Poor reading', 'OK reading', 'Good reading'];   // sensor quality 0..3
+
+// small inline icons for the sensor strip (stroke follows the text colour)
+const svgI = (body, w = 15) => `<svg width="${w}" height="15" viewBox="0 0 ${w === 15 ? 24 : 26} 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
+const ICON = {
+  temp: svgI('<path d="M10 4a2 2 0 1 1 4 0v10.5a4 4 0 1 1-4 0z"/>'),
+  ruler: svgI('<path d="M12 3v18M8 7h4M8 12h4M8 17h4"/>'),
+  battery: p => svgI(`<rect x="2" y="7" width="19" height="10" rx="2"/><rect x="4.5" y="9.5" width="${(14 * Math.min(100, Math.max(0, p)) / 100).toFixed(1)}" height="5" rx="1" fill="currentColor" stroke="none"/><path d="M24 11v2"/>`, 17),
+  signal: n => svgI([5, 10, 15, 20].map((x, k) => `<path d="M${x} 19V${16 - k * 4}"${k < n ? '' : ' opacity=".3"'}/>`).join('')),
+  quality: q => svgI([4, 12, 20].map((x, k) => `<circle cx="${x}" cy="12" r="3" fill="currentColor" stroke="none"${k < q ? '' : ' opacity=".3"'}/>`).join('')),
+};
 
 function cylinder(p, i) {
   const h = 160 * (p || 0) / 100;
@@ -243,33 +264,40 @@ function cylinder(p, i) {
 function tankCard(t, i) {
   const p = t.percent;
   const [st, cls] = status(t);
-  let empty = '–';
+  let empty = '–', emptyDate = '';
   if (t.days_left != null) {
     const d = t.days_left;
-    empty = '~' + (d < 2 ? Math.round(d * 24) + ' h' : Math.round(d) + ' days') + ' · ' + fmtDate(t.empty_at);
+    empty = '~' + (d < 2 ? Math.round(d * 24) + ' h' : Math.round(d) + ' days');
+    emptyDate = fmtDate(t.empty_at);
   }
-  const rate = t.rate_kg_day == null ? 'Learning…' : t.rate_kg_day < 0.1 ? 'Idle' : t.rate_kg_day.toFixed(2) + ' kg/day';
-  const rows = [
-    ['Usage', rate],
-    ['Used last 24 h', t.used_24h == null ? '–' : t.used_24h.toFixed(1) + ' kg'],
-    ['Empty in', empty],
-    ['Temperature', t.temp_c == null ? '–' : t.temp_c + ' °C'],
-    ['Sensor battery', t.battery_v == null ? '–' : t.battery_pct + '% · ' + t.battery_v.toFixed(2) + ' V'],
-    ['Signal', signal(t.rssi)],
-    ['Liquid height', t.level_mm == null ? '–' : t.level_mm + ' mm' + (t.quality == null ? '' : ' · quality ' + t.quality + '/3')],
-  ].map(([k, v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join('');
+  const [rate, rateSub] = t.rate_kg_day == null ? ['Learning', 'needs 6 h'] : t.rate_kg_day < 0.1 ? ['Idle', 'not in use'] : [t.rate_kg_day.toFixed(2) + ' kg', 'per day'];
+  const tile =(k, v, s) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div>${s ? `<div class="s">${s}</div>` : ''}</div>`;
+  const strip = [];
+  if (t.temp_c != null) strip.push(`<span title="Sensor temperature">${ICON.temp}${t.temp_c} °C</span>`);
+  if (t.battery_v != null) strip.push(`<span class="${t.battery_pct < 20 ? 'bad' : ''}" title="Sensor battery">${ICON.battery(t.battery_pct)}${t.battery_pct}% · ${t.battery_v.toFixed(2)} V</span>`);
+  if (t.rssi != null) {
+    const [lab, bars, c] = signal(t.rssi);
+    strip.push(`<span class="${c}" title="Bluetooth signal: ${t.rssi} dBm">${ICON.signal(bars)}${lab} signal</span>`);
+  }
+  if (t.quality != null) strip.push(`<span class="${t.quality < 2 ? 'warn' : ''}" title="How clearly the sensor sees the liquid (quality ${t.quality} of 3)">${ICON.quality(t.quality)}${QUALITY[t.quality]}</span>`);
+  if (t.level_mm != null) strip.push(`<span title="Liquid height">${ICON.ruler}${t.level_mm} mm</span>`);
   let foot = t.mac;
   if (t.age_s != null) foot += ' · updated ' + fmtAge(t.age_s);
   if (t.level_age_s != null && t.level_age_s - (t.age_s || 0) > 1800) foot += ' · level from ' + fmtAge(t.level_age_s);
   return `<div class="card tank">
-    <div class="cyl">${cylinder(p, i)}</div>
-    <div class="info">
-      <div class="top"><div class="name"><span class="dot" style="background:${COLORS[i]}"></span>${t.name}</div><span class="badge ${cls}">${st}</span></div>
-      <div class="pct" style="color:${lvlColor(p)}">${p == null ? '–' : Math.round(p) + '%'}</div>
-      <div class="kg">${t.kg == null ? '–' : t.kg.toFixed(1)} of ${t.capacity_kg} kg</div>
-      <div class="rows">${rows}</div>
-      <div class="foot">${foot}</div>
+    <div class="thead">
+      <div class="cyl">${cylinder(p, i)}</div>
+      <div class="info">
+        <div class="top"><div class="name"><span class="dot" style="background:${COLORS[i]}"></span>${t.name}</div><span class="badge ${cls}">${st}</span></div>
+        <div class="pct" style="color:${lvlColor(p)}">${p == null ? '–' : Math.round(p) + '%'}</div>
+        <div class="kg">${t.kg == null ? '–' : t.kg.toFixed(1)} of ${t.capacity_kg} kg</div>
+      </div>
     </div>
+    <div class="tiles">
+      ${tile('Usage', rate, rateSub)}${tile('Empty in', empty, emptyDate)}${tile('Last 24 h', t.used_24h == null ? '–' : t.used_24h.toFixed(1) + ' kg')}
+    </div>
+    ${strip.length ? `<div class="strip">${strip.join('')}</div>` : ''}
+    <div class="foot">${foot}</div>
   </div>`;
 }
 
