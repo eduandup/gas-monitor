@@ -87,7 +87,8 @@ h1{margin:0;font-size:24px;letter-spacing:-.01em}
   </div>
 </div>
 
-<script src="config.js"></script>
+<!-- GitHub Pages lets browsers cache files for 10 min; the query string makes every load fetch the current config.js -->
+<script>document.write('<script src="config.js?t=' + Date.now() + '"><\/script>');</script>
 <script>
 const $ = id => document.getElementById(id);
 const CFG = Object.assign({tanks: [], hubOfflineMin: 20, expansionPerC: 0.0027}, window.GAS_CONFIG);
