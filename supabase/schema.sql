@@ -23,6 +23,10 @@ create table if not exists public.readings (
   samples    smallint,      -- how many good reads went into level_mm
   unique (tank, ts)         -- a re-sent row (lost reply, retry) is ignored instead of duplicated
 );
+-- hub health, the same on every row of one upload (added later, hence "add column if not exists")
+alter table public.readings add column if not exists wifi_rssi  smallint;   -- the ESP32's Wi-Fi signal, dBm; null = not connected
+alter table public.readings add column if not exists hub_temp_c smallint;   -- the ESP32 chip's own temperature
+alter table public.readings add column if not exists uptime_min integer;    -- minutes since the ESP32 last started
 -- fast "last good level" lookup per tank
 create index if not exists readings_good_level on public.readings (tank, ts desc) where level_mm is not null;
 
@@ -58,7 +62,7 @@ begin
     raise exception 'p_rows must be a JSON array of at most 600 rows' using errcode = '22023';
   end if;
 
-  insert into public.readings (ts, tank, level_mm, quality, temp_c, battery_v, rssi, samples)
+  insert into public.readings (ts, tank, level_mm, quality, temp_c, battery_v, rssi, samples, wifi_rssi, hub_temp_c, uptime_min)
   select coalesce((r->>'ts')::timestamptz, now()),
          (r->>'tank')::smallint,
          (r->>'level_mm')::real,
@@ -66,7 +70,10 @@ begin
          (r->>'temp_c')::smallint,
          (r->>'battery_v')::real,
          (r->>'rssi')::smallint,
-         (r->>'samples')::smallint
+         (r->>'samples')::smallint,
+         (r->>'wifi_rssi')::smallint,
+         (r->>'hub_temp_c')::smallint,
+         (r->>'uptime_min')::integer
   from jsonb_array_elements(p_rows) r
   on conflict (tank, ts) do nothing;
   get diagnostics n = row_count;

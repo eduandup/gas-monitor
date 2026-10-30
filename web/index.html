@@ -5,6 +5,15 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <!-- Cloud dashboard: reads from Supabase. Settings live in config.js. -->
 <title>Gas Monitor</title>
+<!-- home-screen icon and name (iPhone: Share > Add to Home Screen); icons are drawn by tools/make_icons.py -->
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="apple-mobile-web-app-title" content="Gas">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#f3f2ee" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#121211" media="(prefers-color-scheme: dark)">
 <style>
 :root{
   --bg:#f3f2ee;--card:#ffffff;--fg:#1c1c1a;--muted:#6d6c66;--line:#e2e0d9;--track:#ecebe5;--tile:#f6f5f1;--warn-text:#9a5b0b;
@@ -19,6 +28,9 @@ body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,-appl
 header{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:16px}
 h1{margin:0;font-size:24px;letter-spacing:-.01em}
 .sub{color:var(--muted);font-size:13px;margin-top:2px}
+.hubwifi{display:inline-flex;align-items:center;gap:4px;white-space:nowrap;vertical-align:-2px}
+.hubwifi.warn{color:var(--warn-text)}
+.hubwifi.bad{color:var(--low)}
 .summary{display:flex;gap:10px;flex-wrap:wrap}
 .chip{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 14px;min-width:110px}
 .chip .k{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
@@ -217,7 +229,10 @@ function buildState(latest) {
       days_left: days, empty_at: days ? now + days * 86400 : null,
     };
   });
-  return {now, newest, tanks};
+  // hub health rides along on every row; take it from the newest one
+  const top = latest.reduce((a, r) => !a || r.ts > a.ts ? r : a, null);
+  const hub = top && top.wifi_rssi !== undefined ? {wifi: top.wifi_rssi, temp: top.hub_temp_c, up: top.uptime_min} : null;
+  return {now, newest, tanks, hub};
 }
 
 // chart data for the selected range: {gap: s, series: [[[t, pct]], ...]}
@@ -253,7 +268,22 @@ const ICON = {
   battery: p => svgI(`<rect x="2" y="7" width="19" height="10" rx="2"/><rect x="4.5" y="9.5" width="${(14 * Math.min(100, Math.max(0, p)) / 100).toFixed(1)}" height="5" rx="1" fill="currentColor" stroke="none"/><path d="M24 11v2"/>`, 17),
   signal: n => svgI([5, 10, 15, 20].map((x, k) => `<path d="M${x} 19V${16 - k * 4}"${k < n ? '' : ' opacity=".3"'}/>`).join('')),
   quality: q => svgI([4, 12, 20].map((x, k) => `<circle cx="${x}" cy="12" r="3" fill="currentColor" stroke="none"${k < q ? '' : ' opacity=".3"'}/>`).join('')),
+  wifi: n => svgI(['<circle cx="12" cy="19" r="1.4" fill="currentColor" stroke="none"/>', '<path d="M8.5 15.5a5 5 0 0 1 7 0"/>',
+    '<path d="M5.5 12.5a9.2 9.2 0 0 1 13 0"/>', '<path d="M2.5 9.5a13.4 13.4 0 0 1 19 0"/>']
+    .map((p, k) => k < n ? p : p.replace('<path', '<path opacity=".3"').replace('<circle', '<circle opacity=".3"')).join('')),
 };
+
+// the ESP32's own Wi-Fi: [label, arcs lit out of 4, css class]
+function wifiLevel(r) {
+  if (r >= -60) return ['Strong', 4, ''];
+  if (r >= -67) return ['Good', 3, ''];
+  if (r >= -75) return ['OK', 2, ''];
+  return ['Weak', 1, 'warn'];
+}
+
+function fmtUptime(min) {
+  return min < 60 ? min + ' min' : min < 2880 ? Math.round(min / 60) + ' h' : Math.round(min / 1440) + ' days';
+}
 
 function cylinder(p, i) {
   const h = 160 * (p || 0) / 100;
@@ -324,7 +354,18 @@ function render() {
   const days = rate > 0 && any ? kg / rate : null;
   $('sEmpty').textContent = days ? '~' + Math.round(days) + ' days' : '–';
   $('sEmptySub').textContent = days ? fmtDate(state.now + days * 86400) : '';
-  $('sub').textContent = ts.length + ' tanks · ' + (state.newest ? 'updated ' + fmtAge(state.now - state.newest) : 'no readings yet');
+  let sub = ts.length + ' tanks · ' + (state.newest ? 'updated ' + fmtAge(state.now - state.newest) : 'no readings yet');
+  const hub = state.hub, online = state.newest && state.now - state.newest <= CFG.hubOfflineMin * 60;
+  if (hub && online) {
+    const tip = [hub.wifi != null ? 'Hub Wi-Fi ' + hub.wifi + ' dBm' : 'Hub Wi-Fi not connected',
+      hub.up != null ? 'running for ' + fmtUptime(hub.up) : '', hub.temp != null ? 'chip ' + hub.temp + ' °C' : ''].filter(Boolean).join(' · ');
+    if (hub.wifi != null) {
+      const [lab, n, cls] = wifiLevel(hub.wifi);
+      sub += ` · <span class="hubwifi ${cls}" title="${tip}">${ICON.wifi(n)}Wi-Fi ${lab.toLowerCase()}</span>`;
+    }
+    if (hub.temp != null && hub.temp >= 80) sub += ` · <span class="hubwifi bad" title="${tip}">Hub hot: ${hub.temp} °C</span>`;
+  }
+  $('sub').innerHTML = sub;
   $('legend').innerHTML = ts.map((t, i) => `<span><span class="dot" style="background:${COLORS[i]}"></span>${t.name}</span>`).join('');
 
   const off = $('offline');
