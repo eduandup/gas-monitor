@@ -5,9 +5,10 @@
 //
 //  Arduino IDE settings (Tools menu, ESP32S3 Dev Module):
 //    USB CDC On Boot:   Enabled
-//    Partition Scheme:  Huge APP (3MB No OTA/1MB SPIFFS)   <- needed for Wi-Fi + BLE + history storage
+//    Partition Scheme:  Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS)   <- room for two copies, for Wi-Fi updates
 //
 //  Wi-Fi and Supabase keys go in secrets.h (copy secrets.example.h). It is git-ignored.
+//  Updating over Wi-Fi: Tools > Port > "gas at 192.168..." (network port), then Upload; the password is OTA_PASSWORD.
 // =====================================================================
 
 #include <WiFi.h>
@@ -15,6 +16,7 @@
 #include <HTTPClient.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
+#include <ArduinoOTA.h>
 #include <LittleFS.h>
 #include <time.h>
 #include <BLEDevice.h>
@@ -115,6 +117,7 @@ volatile bool uploading = false;           // a TLS request is in flight (heap i
 volatile uint32_t lastAdvertMs = 0;        // any Bluetooth advert, ours or not: the BLE stack is alive
 volatile bool wifiGotIp = false;
 volatile int lastWifiReason = 0;
+volatile bool otaActive = false;           // a Wi-Fi firmware update is running: Bluetooth and uploads pause
 
 WebServer server(80);
 BLEScan *scan;
@@ -182,6 +185,7 @@ void scanTask(void *) {
   esp_task_wdt_add(nullptr);
   for (;;) {
     esp_task_wdt_reset();
+    if (otaActive) { vTaskDelay(pdMS_TO_TICKS(500)); continue; }   // leave the radio to the update
     scan->start(5, false);
     scan->clearResults();
     vTaskDelay(pdMS_TO_TICKS(20));
@@ -403,7 +407,7 @@ void uploadTask(void *) {
   for (;;) {
     esp_task_wdt_reset();
     vTaskDelay(pdMS_TO_TICKS(1000));
-    if (WiFi.status() != WL_CONNECTED || (int32_t)(millis() - retryAtMs) < 0) continue;
+    if (otaActive || WiFi.status() != WL_CONNECTED || (int32_t)(millis() - retryAtMs) < 0) continue;
 
     Row batch[UPLOAD_BATCH];
     xSemaphoreTake(qlock, portMAX_DELAY);
@@ -455,6 +459,37 @@ const char *resetReasonText() {
   }
 }
 
+// gas.local for the web page, plus the "network port" the Arduino IDE uses for Wi-Fi updates
+void announce() {
+  if (!MDNS.begin(HOSTNAME)) return;
+  MDNS.addService("http", "tcp", 80);
+#ifdef OTA_PASSWORD
+  MDNS.enableArduino(3232, true);
+#endif
+}
+
+// firmware updates over Wi-Fi from the Arduino IDE (same network only, password protected)
+void setupOta() {
+#ifdef OTA_PASSWORD
+  ArduinoOTA.setHostname(HOSTNAME);
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA.setMdnsEnabled(false);          // announce() does it, and again after every reconnect
+  ArduinoOTA.onStart([]() {
+    otaActive = true;
+    Serial.println("Wi-Fi update starting");
+    saveHistory();
+    saveQueue();
+  });
+  ArduinoOTA.onProgress([](unsigned int done, unsigned int total) { esp_task_wdt_reset(); });
+  ArduinoOTA.onEnd([]() { Serial.println("Wi-Fi update done, restarting"); });
+  ArduinoOTA.onError([](ota_error_t e) { Serial.printf("Wi-Fi update failed (error %d)\n", (int)e); otaActive = false; });
+  ArduinoOTA.begin();
+  Serial.println("Wi-Fi updates on (port 3232)");
+#else
+  Serial.println("Wi-Fi updates off: add OTA_PASSWORD to secrets.h");
+#endif
+}
+
 // runs in the Wi-Fi driver's task: only set flags here, loop() does the work
 void onWiFiEvent(WiFiEvent_t e, WiFiEventInfo_t info) {
   if (e == ARDUINO_EVENT_WIFI_STA_GOT_IP) wifiGotIp = true;
@@ -465,7 +500,7 @@ void onWiFiEvent(WiFiEvent_t e, WiFiEventInfo_t info) {
 void healthCheck() {
   static uint32_t lastCheckMs = 0, lastDialMs = 0, downSinceMs = 0, lowHeapSecs = 0;
   uint32_t ms = millis();
-  if (ms - lastCheckMs < 1000) return;
+  if (ms - lastCheckMs < 1000 || otaActive) return;
   lastCheckMs = ms;
 
   // Wi-Fi: the driver reconnects by itself, but re-dial every minute in case it gave up
@@ -484,7 +519,7 @@ void healthCheck() {
   if (wifiGotIp) {                       // (re)connected: mDNS has to be told about the address again
     wifiGotIp = false;
     MDNS.end();
-    if (MDNS.begin(HOSTNAME)) MDNS.addService("http", "tcp", 80);
+    announce();
     Serial.printf("Wi-Fi up: %s, %d dBm\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
   }
 
@@ -635,12 +670,12 @@ void setup() {
 
   configTzTime(TZ_INFO, "pool.ntp.org", "time.google.com");
 
-  MDNS.begin(HOSTNAME);
   server.on("/", handleRoot);
   server.on("/api/state", handleState);
   server.on("/api/history", handleHistory);
   server.begin();
-  MDNS.addService("http", "tcp", 80);
+  announce();
+  setupOta();
 
   BLEDevice::init("");
   scan = BLEDevice::getScan();
@@ -660,6 +695,7 @@ void setup() {
 
 void loop() {
   esp_task_wdt_reset();
+  ArduinoOTA.handle();
   server.handleClient();
   healthCheck();
 

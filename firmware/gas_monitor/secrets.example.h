@@ -11,3 +11,6 @@
 // Random secret that lets this board write readings. Only its SHA-256 hash is stored in Supabase.
 // Generate one with:  python -c "import secrets; print(secrets.token_urlsafe(32))"
 #define DEVICE_KEY        "replace-with-a-long-random-string"
+
+// Password for firmware updates over Wi-Fi (the Arduino IDE asks for it). Leave it out to turn Wi-Fi updates off.
+#define OTA_PASSWORD      "choose-a-password"

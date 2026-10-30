@@ -31,14 +31,22 @@ EyeGas Pro / Mopeka sensors --Bluetooth--> ESP32-S3 --HTTPS every 5 min--> Supab
 Arduino IDE, board **ESP32S3 Dev Module**, port **COM5**, and in the Tools menu:
 
 - **USB CDC On Boot: Enabled**. Without it the Serial Monitor stays empty.
-- **Partition Scheme: Huge APP (3MB No OTA/1MB SPIFFS)**. Wi-Fi, Bluetooth and the history storage don't fit otherwise.
+- **Partition Scheme: Minimal SPIFFS (1.9MB APP with OTA/190KB SPIFFS)**. It keeps room for a second copy of the program, which updates over Wi-Fi need.
 
-Open `firmware/gas_monitor/gas_monitor.ino` and click Upload. Set the Serial Monitor to 115200 baud. Every 30 s it prints the sensor readings, the free memory ("heap"), and how many rows are waiting to upload. Every 5 minutes it also prints `uploaded N rows`.
+Open `firmware/gas_monitor/gas_monitor.ino` and click Upload. Set the Serial Monitor to 115200 baud. At start-up it prints why it last restarted. Every 30 s it prints the sensor readings, the Wi-Fi signal, the free memory ("heap"), the chip temperature, the uptime, and how many rows are waiting to upload. Every 5 minutes it also prints `uploaded N rows`.
+
+### Updating over Wi-Fi (once it's mounted outside)
+
+The laptop must be on the same Wi-Fi as the hub. In the Arduino IDE pick **Tools → Port → gas at 192.168.x.x** (a network port instead of COM5) and click Upload. It asks for the password: `OTA_PASSWORD` in `secrets.h`. It takes about a minute, then the hub restarts by itself. The Serial Monitor only works over USB.
+
+### When it's left alone
+
+The hub repairs itself: it reconnects Wi-Fi, a watchdog resets it if anything hangs for 2 minutes, it restarts when Wi-Fi is gone for 30 minutes, Bluetooth goes silent for 30 minutes, nothing uploads for 3 hours or memory runs low, and it restarts every night at 03:00. Unsent readings are saved to flash first and sent after the restart. The website header shows its Wi-Fi signal (hover for uptime and chip temperature) and warns when the hub runs hot.
 
 From the command line, the Arduino IDE ships its own `arduino-cli`:
 
 ```bash
-"$LOCALAPPDATA/Programs/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe" compile --upload -p COM5 -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=huge_app" firmware/gas_monitor
+"$LOCALAPPDATA/Programs/Arduino IDE/resources/app/lib/backend/resources/arduino-cli.exe" compile --upload -p COM5 -b "esp32:esp32:esp32s3:CDCOnBoot=cdc,PartitionScheme=min_spiffs" firmware/gas_monitor
 ```
 
 ## Setting up Supabase (once)
