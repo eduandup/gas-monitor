@@ -20,6 +20,7 @@
 #include <BLEDevice.h>
 #include <BLEScan.h>
 #include <BLEAdvertisedDevice.h>
+#include <esp_task_wdt.h>
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -50,7 +51,7 @@ const int NUM_TANKS = sizeof(TANKS) / sizeof(TANKS[0]);
 
 const char *TZ_INFO     = "SAST-2";   // South Africa (UTC+2)
 const uint32_t BUCKET_S = 900;        // one history point every 15 minutes
-const int HIST_LEN      = 2880;       // 30 days of history per tank
+const int HIST_LEN      = 2016;       // 21 days of history per tank (the cloud keeps the rest; frees RAM for TLS)
 const float RATE_WINDOW_H = 72;       // usage rate = trend over the last 3 days
 const float REFILL_JUMP_PCT = 8;      // a rise bigger than this is treated as a refill
 
@@ -58,6 +59,15 @@ const uint32_t UPLOAD_S   = 300;      // one cloud row per tank every 5 minutes
 const int QUEUE_LEN       = 576;      // rows kept while offline: 24 h for 2 tanks
 const int UPLOAD_BATCH    = 36;       // rows per HTTPS request
 const uint32_t SENSOR_LOST_MS = 900000;   // sensor counts as "not heard" after 15 minutes
+
+// self-healing: the hub runs unattended outdoors, so it repairs or restarts itself
+const uint32_t WIFI_RETRY_MS     = 60000UL;          // re-dial Wi-Fi every minute while it's down
+const uint32_t WIFI_REBOOT_MS    = 30 * 60000UL;     // still no Wi-Fi after 30 min: restart
+const uint32_t UPLOAD_REBOOT_MS  = 3 * 3600000UL;    // Wi-Fi up but no upload accepted for 3 h: restart
+const uint32_t BLE_REBOOT_MS     = 30 * 60000UL;     // no Bluetooth adverts from anything for 30 min: restart
+const uint32_t HEAP_MIN_BLOCK    = 24000;            // largest free block below this for a minute (while idle): restart
+const int      DAILY_RESTART_HOUR = 3;               // fresh start every night at 03:xx
+const uint32_t WDT_TIMEOUT_S     = 120;              // a task stuck this long resets the board
 // ==================================================================
 
 // ---------- live readings (written by the BLE task) ----------
@@ -89,6 +99,8 @@ struct Row {               // one tank, one 5-min window; "null" markers: mm10 <
   int16_t mm10;
   int8_t tank, quality, tempC, rssi;
   uint8_t batt32, samples;
+  int8_t wifiRssi, hubTempC;   // hub health: Wi-Fi signal (0 = not connected) and chip temperature
+  uint16_t upMin;              // minutes since the hub started
 };
 Row queue[QUEUE_LEN];
 uint32_t qEnd = 0;         // sequence number of the next row; row s lives in queue[s % QUEUE_LEN]
@@ -97,6 +109,12 @@ uint32_t qDropped = 0;     // rows lost because the queue was full
 SemaphoreHandle_t qlock;
 volatile int lastUploadCode = 0;
 volatile uint32_t lastUploadOkMs = 0, uploadedTotal = 0;
+volatile bool uploading = false;           // a TLS request is in flight (heap is briefly low then)
+
+// ---------- health (see healthCheck) ----------
+volatile uint32_t lastAdvertMs = 0;        // any Bluetooth advert, ours or not: the BLE stack is alive
+volatile bool wifiGotIp = false;
+volatile int lastWifiReason = 0;
 
 WebServer server(80);
 BLEScan *scan;
@@ -127,6 +145,7 @@ float median(float *v, int n) {
 // ---------- BLE ----------
 class Callbacks : public BLEAdvertisedDeviceCallbacks {
   void onResult(BLEAdvertisedDevice dev) {
+    lastAdvertMs = millis();
     if (!dev.haveManufacturerData()) return;
     auto md = dev.getManufacturerData();
     if (md.length() != 12 || (uint8_t)md[0] != 0x59 || (uint8_t)md[1] != 0x00) return;
@@ -160,7 +179,9 @@ class Callbacks : public BLEAdvertisedDeviceCallbacks {
 };
 
 void scanTask(void *) {
+  esp_task_wdt_add(nullptr);
   for (;;) {
+    esp_task_wdt_reset();
     scan->start(5, false);
     scan->clearResults();
     vTaskDelay(pdMS_TO_TICKS(20));
@@ -288,8 +309,36 @@ void closeUploadWindow(uint32_t t) {
     r.tempC = heard ? L.tempC : 0;
     r.rssi = heard ? L.rssi : 0;
     r.batt32 = heard ? (uint8_t)lroundf(L.voltage * 32) : 0;
+    r.wifiRssi = WiFi.status() == WL_CONNECTED ? (int8_t)constrain(WiFi.RSSI(), -127, -1) : 0;
+    r.hubTempC = (int8_t)constrain(lroundf(temperatureRead()), -40L, 125L);
+    r.upMin = (uint16_t)min(millis() / 60000UL, 65535UL);
     enqueue(r);
   }
+}
+
+// rows not uploaded yet survive a restart: saved before planned restarts and hourly (covers most power cuts)
+void saveQueue() {
+  xSemaphoreTake(qlock, portMAX_DELAY);
+  uint32_t first = qEnd - qCount;
+  File f = LittleFS.open("/queue.bin", "w");
+  if (f) {
+    for (int k = 0; k < qCount; k++) f.write((const uint8_t *)&queue[(first + k) % QUEUE_LEN], sizeof(Row));
+    f.close();
+  }
+  xSemaphoreGive(qlock);
+}
+
+void loadQueue() {
+  File f = LittleFS.open("/queue.bin", "r");
+  if (!f) return;
+  Row r; int n = 0;
+  while (n < QUEUE_LEN && f.read((uint8_t *)&r, sizeof(Row)) == sizeof(Row)) {
+    if (r.ts < 1700000000 || r.tank < 1 || r.tank > NUM_TANKS) continue;   // not a row from this firmware
+    enqueue(r); n++;
+  }
+  f.close();
+  LittleFS.remove("/queue.bin");   // re-sent rows are ignored by the database anyway, but don't replay them twice
+  if (n) Serial.printf("%d queued rows restored from flash\n", n);
 }
 
 void rowJson(String &b, const Row &r) {
@@ -305,6 +354,9 @@ void rowJson(String &b, const Row &r) {
   b += ",\"battery_v\":"; b += r.batt32 ? String(r.batt32 / 32.0f, 2) : String("null");
   b += ",\"rssi\":"; b += heard ? String((int)r.rssi) : String("null");
   b += ",\"samples\":"; b += String((int)r.samples);
+  b += ",\"wifi_rssi\":"; b += r.wifiRssi ? String((int)r.wifiRssi) : String("null");
+  b += ",\"hub_temp_c\":"; b += String((int)r.hubTempC);
+  b += ",\"uptime_min\":"; b += String((unsigned)r.upMin);
   b += "}";
 }
 
@@ -320,12 +372,14 @@ int postRows(const Row *rows, int n) {
   if (url.endsWith("/")) url.remove(url.length() - 1);
   url += "/rest/v1/rpc/ingest";
 
+  uploading = true;
   WiFiClientSecure client;
   client.setCACert(SUPABASE_ROOT_CA);       // real certificate check, see ca_certs.h
+  client.setHandshakeTimeout(20);           // seconds; the default (120 s) could trip the watchdog
   HTTPClient http;
   http.setConnectTimeout(10000);
   http.setTimeout(15000);
-  if (!http.begin(client, url)) { lastUploadCode = -1; Serial.println("upload: bad SUPABASE_URL"); return -1; }
+  if (!http.begin(client, url)) { uploading = false; lastUploadCode = -1; Serial.println("upload: bad SUPABASE_URL"); return -1; }
   http.addHeader("Content-Type", "application/json");
   http.addHeader("apikey", SUPABASE_ANON_KEY);
   if (strncmp(SUPABASE_ANON_KEY, "eyJ", 3) == 0)          // legacy JWT anon key also goes in Authorization
@@ -333,6 +387,7 @@ int postRows(const Row *rows, int n) {
   int code = http.POST(body);
   String resp = code > 0 ? http.getString() : String();
   http.end();
+  uploading = false;
   lastUploadCode = code;
   if (code == 200) { lastUploadOkMs = millis(); uploadedTotal += n; return resp.toInt(); }
   if (code < 0) Serial.printf("upload: %s\n", HTTPClient::errorToString(code).c_str());
@@ -344,7 +399,9 @@ int postRows(const Row *rows, int n) {
 void uploadTask(void *) {
   uint32_t retryAtMs = 0;
   int fails = 0;
+  esp_task_wdt_add(nullptr);
   for (;;) {
+    esp_task_wdt_reset();
     vTaskDelay(pdMS_TO_TICKS(1000));
     if (WiFi.status() != WL_CONNECTED || (int32_t)(millis() - retryAtMs) < 0) continue;
 
@@ -372,6 +429,83 @@ void uploadTask(void *) {
       retryAtMs = millis() + wait;
       Serial.printf("upload failed, retrying in %lu s (%d rows queued)\n", (unsigned long)(wait / 1000), qCount);
     }
+  }
+}
+
+// ---------- self-healing ----------
+void restartNow(const char *why) {
+  Serial.printf("Restarting: %s\n", why);
+  saveHistory();
+  saveQueue();
+  delay(300);
+  ESP.restart();
+}
+
+const char *resetReasonText() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  return "power on";
+    case ESP_RST_SW:       return "planned restart";
+    case ESP_RST_PANIC:    return "crash";
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:      return "watchdog (something hung)";
+    case ESP_RST_BROWNOUT: return "brownout (power dipped)";
+    case ESP_RST_USB:      return "USB";
+    default:               return "other";
+  }
+}
+
+// runs in the Wi-Fi driver's task: only set flags here, loop() does the work
+void onWiFiEvent(WiFiEvent_t e, WiFiEventInfo_t info) {
+  if (e == ARDUINO_EVENT_WIFI_STA_GOT_IP) wifiGotIp = true;
+  else if (e == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) lastWifiReason = info.wifi_sta_disconnected.reason;
+}
+
+// once a second from loop(): keeps Wi-Fi up and restarts the board when something is stuck
+void healthCheck() {
+  static uint32_t lastCheckMs = 0, lastDialMs = 0, downSinceMs = 0, lowHeapSecs = 0;
+  uint32_t ms = millis();
+  if (ms - lastCheckMs < 1000) return;
+  lastCheckMs = ms;
+
+  // Wi-Fi: the driver reconnects by itself, but re-dial every minute in case it gave up
+  if (WiFi.status() == WL_CONNECTED) {
+    downSinceMs = 0;
+  } else {
+    if (!downSinceMs) downSinceMs = ms | 1;
+    if (ms - lastDialMs > WIFI_RETRY_MS) {
+      lastDialMs = ms;
+      Serial.printf("Wi-Fi down (reason %d), reconnecting\n", lastWifiReason);
+      WiFi.disconnect();
+      WiFi.begin(WIFI_SSID, WIFI_PASS);
+    }
+    if (ms - downSinceMs > WIFI_REBOOT_MS) restartNow("no Wi-Fi for 30 minutes");
+  }
+  if (wifiGotIp) {                       // (re)connected: mDNS has to be told about the address again
+    wifiGotIp = false;
+    MDNS.end();
+    if (MDNS.begin(HOSTNAME)) MDNS.addService("http", "tcp", 80);
+    Serial.printf("Wi-Fi up: %s, %d dBm\n", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+  }
+
+  // uploads: Wi-Fi works but Supabase hasn't accepted anything for hours
+  if (cloudEnabled() && WiFi.status() == WL_CONNECTED && qCount > 0 && ms - lastUploadOkMs > UPLOAD_REBOOT_MS)
+    restartNow("no upload accepted for 3 hours");
+
+  // Bluetooth: no adverts from any device at all means the BLE stack has stalled
+  if (ms > BLE_REBOOT_MS && ms - lastAdvertMs > BLE_REBOOT_MS) restartNow("no Bluetooth adverts for 30 minutes");
+
+  // memory: badly fragmented heap (checked only between uploads, when it should be roomy)
+  if (!uploading && ESP.getMaxAllocHeap() < HEAP_MIN_BLOCK) {
+    if (++lowHeapSecs >= 60) restartNow("memory low");
+  } else lowHeapSecs = 0;
+
+  // nightly fresh start (after at least 20 h up, so it happens once)
+  time_t now = time(nullptr);
+  if (now > 1700000000 && ms > 20 * 3600000UL && !uploading) {
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+    if (tmv.tm_hour == DAILY_RESTART_HOUR) restartNow("daily restart");
   }
 }
 
@@ -473,18 +607,27 @@ void handleHistory() {
 void setup() {
   Serial.begin(115200);
   delay(2000);
+  Serial.printf("\nGas Monitor starting (last reset: %s)\n", resetReasonText());
   lock = xSemaphoreCreateMutex();
   qlock = xSemaphoreCreateMutex();
 
+  // watchdog: a task that stops checking in for WDT_TIMEOUT_S resets the board
+  esp_task_wdt_config_t wdt = {.timeout_ms = WDT_TIMEOUT_S * 1000, .idle_core_mask = 0, .trigger_panic = true};
+  if (esp_task_wdt_reconfigure(&wdt) != ESP_OK) esp_task_wdt_init(&wdt);
+  esp_task_wdt_add(nullptr);   // this task: setup() and loop()
+
   if (!LittleFS.begin(true)) Serial.println("LittleFS mount failed: history won't survive a reboot");
   loadHistory();
+  loadQueue();
 
+  WiFi.persistent(false);      // don't rewrite the Wi-Fi settings in flash on every reconnect
+  WiFi.onEvent(onWiFiEvent);
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(HOSTNAME);
   WiFi.setAutoReconnect(true);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   Serial.print("Connecting to Wi-Fi");
-  for (int k = 0; k < 40 && WiFi.status() != WL_CONNECTED; k++) { delay(500); Serial.print("."); }
+  for (int k = 0; k < 40 && WiFi.status() != WL_CONNECTED; k++) { delay(500); Serial.print("."); esp_task_wdt_reset(); }
   if (WiFi.status() == WL_CONNECTED)
     Serial.printf("\nConnected. Open http://%s.local or http://%s\n", HOSTNAME, WiFi.localIP().toString().c_str());
   else
@@ -516,7 +659,9 @@ void setup() {
 }
 
 void loop() {
+  esp_task_wdt_reset();
   server.handleClient();
+  healthCheck();
 
   static uint32_t lastBucket = 0, lastWindow = 0, lastSaveMs = 0, lastPrintMs = 0;
   static bool dirty = false;
@@ -532,11 +677,16 @@ void loop() {
     else if (w != lastWindow) { if (cloudEnabled()) closeUploadWindow(w * UPLOAD_S); lastWindow = w; }
   }
 
-  if (dirty && millis() - lastSaveMs > 3600000UL) { saveHistory(); lastSaveMs = millis(); dirty = false; }
+  if (dirty && millis() - lastSaveMs > 3600000UL) {
+    saveHistory();
+    if (qCount) saveQueue();
+    lastSaveMs = millis(); dirty = false;
+  }
 
   if (millis() - lastPrintMs > 30000) {
     lastPrintMs = millis();
-    Serial.printf("[%s] ", WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "no Wi-Fi");
+    if (WiFi.status() == WL_CONNECTED) Serial.printf("[%s %d dBm] ", WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    else Serial.print("[no Wi-Fi] ");
     for (int i = 0; i < NUM_TANKS; i++) {
       xSemaphoreTake(lock, portMAX_DELAY);
       Live L = live[i];
@@ -544,7 +694,8 @@ void loop() {
       if (L.valid) Serial.printf("%s: %.0f mm q%d %dC %.2fV  ", TANKS[i].name, L.levelMm, L.quality, L.tempC, L.voltage);
       else Serial.printf("%s: not heard  ", TANKS[i].name);
     }
-    Serial.printf("| heap %lu (min %lu)", (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap());
+    Serial.printf("| heap %lu (min %lu, block %lu) | %.0f C | up %lu min", (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getMinFreeHeap(),
+                  (unsigned long)ESP.getMaxAllocHeap(), temperatureRead(), (unsigned long)(millis() / 60000));
     if (cloudEnabled()) {
       Serial.printf(" | queued %d, sent %lu", qCount, (unsigned long)uploadedTotal);
       if (qDropped) Serial.printf(", dropped %lu", (unsigned long)qDropped);
