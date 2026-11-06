@@ -121,6 +121,7 @@ const $ = id => document.getElementById(id);
 const CFG = Object.assign({tanks: [], hubOfflineMin: 20, expansionPerC: 0.0027}, window.GAS_CONFIG);
 const COLORS = ['var(--c1)', 'var(--c2)', '#7a5cc2', '#3a9b8f'];
 const RATE_WINDOW_H = 72, REFILL_JUMP_PCT = 8;      // same as the ESP32 sketch
+const IN_USE_KG_DAY = 0.25;                         // below this a tank is idle: a full standby cylinder wobbles up to ~0.1 kg/day
 const BUCKET_MIN = {72: 15, 168: 30, 720: 120};     // history fetched per range: hours -> bucket minutes
 let demo = false, state = null, range = 168, series = [], geom = null;
 let cache = {}, lastNewest = null;                  // cache[hours] = {at, bucket, by: {tank: [[t, mm, tempC]]}}
@@ -202,8 +203,22 @@ async function loadHistory(hours) {
   const rows = await sb('rpc/history', {p_hours: hours, p_bucket_min: bucket});
   const by = {};
   for (const r of rows) (by[r.tank] = by[r.tank] || []).push([tsOf(r.bucket) + bucket * 30, r.level_mm, r.temp_c]);   // plot at bucket middle
+  for (const t in by) by[t] = despike(by[t]);
   cache[hours] = {at: Date.now(), bucket, by};
 }
+
+// A sensor with a weak echo (quality 0-1) now and then reports a wild value for one window, like 150 or
+// 590 mm. A point further than SPIKE_MM from the median of its 3 neighbours on each side is dropped.
+// A real refill survives: once three points sit at the new level, they outvote the old ones.
+const SPIKE_MM = 30;
+function despike(pts) {
+  return pts.filter((p, k) => {
+    const nb = pts.slice(Math.max(0, k - 3), k).concat(pts.slice(k + 1, k + 4)).map(q => q[1]).sort((a, b) => a - b);
+    return nb.length < 2 || Math.abs(p[1] - nb[nb.length >> 1]) <= SPIKE_MM;
+  });
+}
+
+const median = xs => { const s = xs.filter(x => x != null).sort((a, b) => a - b); return s.length ? s[s.length >> 1] : null; };
 
 function buildState(latest) {
   const now = Date.now() / 1000, h = cache[72];
@@ -213,15 +228,25 @@ function buildState(latest) {
     const ts = r ? tsOf(r.ts) : null;
     if (ts && (newest == null || ts > newest)) newest = ts;
     const heard = !!r && r.quality != null;
-    const mm = r && r.good_level_mm != null ? r.good_level_mm : null;
-    const pct = mm == null ? null : pctFor(c, mm, r.good_temp_c);
+    // shown level: the median of the last hour of (spike-free) history, so one odd window can't swing
+    // the card; falls back to the newest good row when history is older than 3 hours
+    const hist = (h && h.by[c.tank]) || [];
+    const lastT = hist.length ? hist[hist.length - 1][0] : null;
+    let mm = null, mmTemp = null, mmTs = null;
+    if (lastT != null && now - lastT < 3 * 3600) {
+      const hour = hist.filter(p => p[0] > lastT - 3600);
+      mm = median(hour.map(p => p[1])); mmTemp = median(hour.map(p => p[2])); mmTs = Math.min(now, lastT);
+    } else if (r && r.good_level_mm != null) {
+      mm = r.good_level_mm; mmTemp = r.good_temp_c; mmTs = tsOf(r.good_ts);
+    }
+    const pct = mm == null ? null : pctFor(c, mm, mmTemp);
     const kg = pct == null ? null : c.capacityKg * pct / 100;
-    const pts = ((h && h.by[c.tank]) || []).map(([t, v, tc]) => [t, pctFor(c, v, tc)]);
+    const pts = hist.map(([t, v, tc]) => [t, pctFor(c, v, tc)]);
     const st = computeStats(pts, c.capacityKg, now);
-    const days = st.rate != null && st.rate >= 0.1 && kg != null ? kg / st.rate : null;
+    const days = st.rate != null && st.rate >= IN_USE_KG_DAY && kg != null ? kg / st.rate : null;
     return {
       name: c.name, mac: c.mac, capacity_kg: c.capacityKg, valid: heard,
-      age_s: ts == null ? null : now - ts, level_age_s: r && r.good_ts ? now - tsOf(r.good_ts) : null,
+      age_s: ts == null ? null : now - ts, level_age_s: mmTs == null ? null : now - mmTs,
       quality: heard ? r.quality : null, level_mm: mm == null ? null : Math.round(mm), percent: pct, kg,
       temp_c: heard ? r.temp_c : null, battery_v: heard ? r.battery_v : null,
       battery_pct: heard && r.battery_v != null ? Math.round(Math.min(100, Math.max(0, (r.battery_v - 2.2) / 0.65 * 100))) : null,
@@ -247,8 +272,9 @@ function chartData() {
 function status(t) {
   if (t.age_s == null || t.age_s > CFG.hubOfflineMin * 60) return ['Hub offline', 'bad'];
   if (!t.valid) return ['No signal', 'bad'];
-  if (t.quality === 0) return ['No reading', 'bad'];
-  if (t.rate_kg_day != null && t.rate_kg_day >= 0.1) return ['In use', 'use'];
+  // a weak sensor flips between quality 0 and 1; only call it "No reading" once there's been no level for 3 h
+  if (t.quality === 0 && (t.level_age_s == null || t.level_age_s > 3 * 3600)) return ['No reading', 'bad'];
+  if (t.rate_kg_day != null && t.rate_kg_day >= IN_USE_KG_DAY) return ['In use', 'use'];
   return ['Standby', ''];
 }
 
@@ -307,7 +333,7 @@ function tankCard(t, i) {
     empty = '~' + (d < 2 ? Math.round(d * 24) + ' h' : Math.round(d) + ' days');
     emptyDate = fmtDate(t.empty_at);
   }
-  const [rate, rateSub] = t.rate_kg_day == null ? ['Learning', 'needs 6 h'] : t.rate_kg_day < 0.1 ? ['Idle', 'not in use'] : [t.rate_kg_day.toFixed(2) + ' kg', 'per day'];
+  const [rate, rateSub] = t.rate_kg_day == null ? ['Learning', 'needs 6 h'] : t.rate_kg_day < IN_USE_KG_DAY ? ['Idle', 'not in use'] : [t.rate_kg_day.toFixed(2) + ' kg', 'per day'];
   const tile =(k, v, s) => `<div class="tile"><div class="k">${k}</div><div class="v">${v}</div>${s ? `<div class="s">${s}</div>` : ''}</div>`;
   const strip = [];
   if (t.temp_c != null) strip.push(`<span title="Sensor temperature">${ICON.temp}${t.temp_c} °C</span>`);
@@ -346,7 +372,7 @@ function render() {
   ts.forEach(t => {
     cap += t.capacity_kg;
     if (t.kg != null) { kg += t.kg; any = true; }
-    if (t.rate_kg_day != null && t.rate_kg_day >= 0.1) rate += t.rate_kg_day;
+    if (t.rate_kg_day != null && t.rate_kg_day >= IN_USE_KG_DAY) rate += t.rate_kg_day;
   });
   $('sTotal').textContent = any ? kg.toFixed(0) + ' / ' + cap + ' kg' : '–';
   $('sRate').textContent = rate > 0 ? rate.toFixed(2) + ' kg' : '–';
@@ -505,7 +531,7 @@ function enterDemo(why) {
     B.push([t, +(97 + wob + (rand() - .5) * 0.4).toFixed(1)]);
   }
   const mk = (c, p, rate, used, temp, bv, rssi) => {
-    const kg = c.capacityKg * p / 100, d = rate >= 0.1 ? kg / rate : null;
+    const kg = c.capacityKg * p / 100, d = rate >= IN_USE_KG_DAY ? kg / rate : null;
     return {name: c.name, mac: c.mac, capacity_kg: c.capacityKg, valid: true, age_s: Math.round(rand() * 240), level_age_s: null,
       quality: 3, level_mm: Math.round(c.emptyMm + p / 100 * (c.fullMm - c.emptyMm)), percent: p, kg, temp_c: temp,
       battery_v: bv, battery_pct: 100, rssi, rate_kg_day: rate, used_24h: used, days_left: d, empty_at: d ? now + d * 86400 : null};
